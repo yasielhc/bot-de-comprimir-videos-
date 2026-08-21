@@ -1,0 +1,8 @@
+services:
+  - type: web
+    name: telegram-video-compressor
+    env: docker
+    plan: free
+    envVars:
+      - key: TELEGRAM_TOKEN
+        sync: false
