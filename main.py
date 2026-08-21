@@ -1,12 +1,23 @@
 #!/usr/bin/env python3
 """
-Bot de Telegram para comprimir videos
+Bot de Telegram para comprimir videos - Versión Render
 """
 
 import os
 import logging
+import asyncio
+from pathlib import Path
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
+from telegram.error import TelegramError
+
+# Importar el compresor de videos
+try:
+    from video_compressor import VideoCompressor
+    FFMPEG_AVAILABLE = True
+except Exception as e:
+    FFMPEG_AVAILABLE = False
+    print(f"⚠️ Advertencia: {e}")
 
 # Configuración de logging
 logging.basicConfig(
@@ -25,7 +36,23 @@ if not BOT_TOKEN:
         "Agrega la variable de entorno BOT_TOKEN en Render Dashboard."
     )
 
-logger.info("✅ Bot inicializando...")
+logger.info("✅ Token de Telegram detectado")
+
+# Crear directorios temporales
+TEMP_DIR = Path("/tmp/downloads")
+OUTPUT_DIR = Path("/tmp/compressed")
+TEMP_DIR.mkdir(parents=True, exist_ok=True)
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+# Inicializar compresor si FFmpeg está disponible
+compressor = None
+if FFMPEG_AVAILABLE:
+    try:
+        compressor = VideoCompressor()
+        logger.info("✅ FFmpeg detectado - Compresión habilitada")
+    except Exception as e:
+        logger.warning(f"⚠️ FFmpeg no disponible: {e}")
+        compressor = None
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -33,7 +60,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     welcome_message = """
 🎥 **¡Bienvenido al Bot de Compresión de Videos!**
 
-Este bot te ayuda a comprimir videos de manera rápida y fácil.
+Este bot comprime videos automáticamente y te envía el resultado.
+
+**Cómo usar:**
+1️⃣ Envía un video
+2️⃣ Espera a que se comprima
+3️⃣ Recibe el video comprimido
 
 **Opciones disponibles:**
 ✅ Envía un video para comprimirlo
@@ -58,20 +90,23 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     help_text = """
 📖 **GUÍA DE USO**
 
-1. **Enviar video:** Solo envía un video al chat
-2. **Esperar:** El bot procesará el video
-3. **Descargar:** Recibirás el video comprimido
+**Paso 1:** Envía un video
+**Paso 2:** Selecciona la calidad (opcional con /settings)
+**Paso 3:** Espera a que se comprima
+**Paso 4:** Recibe tu video comprimido
 
 **Formatos soportados:**
-• MP4, AVI, MOV, MKV, FLV, WebM
+• MP4, AVI, MOV, MKV, FLV, WebM, 3GP
 
-**Configuración de compresión:**
-• Calidad: Baja, Media, Alta
-• Resolución: 480p, 720p, 1080p
+**Niveles de Calidad:**
+🎯 **Baja:** 50-70% más pequeño
+⚖️ **Media:** 40-60% más pequeño (recomendado)
+🎬 **Alta:** 20-40% más pequeño
 
-**Límites:**
-• Tamaño máximo: 2GB
-• Tiempo máximo de espera: 30 minutos
+**Información:**
+• Tiempo de compresión: Depende del tamaño
+• Máximo: 2GB por video
+• El bot mantiene la relación de aspecto
 
 ¿Preguntas? Usa /settings
     """
@@ -84,9 +119,9 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     settings_text += "Selecciona la calidad de compresión:\n"
     
     keyboard = [
-        [InlineKeyboardButton("🎯 Baja (más pequeño)", callback_data='quality_low')],
-        [InlineKeyboardButton("⚖️ Media (equilibrado)", callback_data='quality_medium')],
-        [InlineKeyboardButton("🎬 Alta (mejor calidad)", callback_data='quality_high')]
+        [InlineKeyboardButton("🎯 Baja (50-70% reducción)", callback_data='quality_low')],
+        [InlineKeyboardButton("⚖️ Media (40-60% reducción)", callback_data='quality_medium')],
+        [InlineKeyboardButton("🎬 Alta (20-40% reducción)", callback_data='quality_high')]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
@@ -107,15 +142,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         help_text = """
 📖 **GUÍA DE USO**
 
-1. **Enviar video:** Solo envía un video al chat
-2. **Esperar:** El bot procesará el video
-3. **Descargar:** Recibirás el video comprimido
+1. Envía un video
+2. Espera a que se comprima
+3. Recibe el resultado
 
 **Formatos soportados:**
 • MP4, AVI, MOV, MKV, FLV, WebM
 
-**Límites:**
-• Tamaño máximo: 2GB
+**Tiempo de espera:**
+Depende del tamaño del video
         """
         await query.edit_message_text(text=help_text, parse_mode='Markdown')
     elif query.data == 'settings':
@@ -139,39 +174,147 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Manejo de videos enviados"""
     try:
-        # Por ahora, solo confirmamos que recibimos el video
         video = update.message.video
         
         if not video:
             await update.message.reply_text("❌ Por favor, envía un archivo de video válido.")
             return
         
+        # Verificar tamaño
         file_size_mb = video.file_size / (1024 * 1024)
+        if file_size_mb > 2000:
+            await update.message.reply_text(
+                f"❌ El video es muy grande ({file_size_mb:.2f} MB)\n"
+                f"Máximo permitido: 2000 MB"
+            )
+            return
         
-        # Mensaje de confirmación (sin procesar aún)
-        await update.message.reply_text(
-            f"📹 Video recibido\n"
-            f"Tamaño: {file_size_mb:.2f} MB\n\n"
-            f"ℹ️ La compresión de videos requiere FFmpeg.\n"
-            f"🔧 Para usar la compresión completa, ejecuta este bot localmente.",
-            parse_mode='Markdown'
+        # Obtener configuración del usuario
+        quality = context.user_data.get('quality', 'medium')
+        
+        # Mensaje inicial
+        progress_msg = await update.message.reply_text(
+            f"⏳ Procesando video...\n\n"
+            f"📊 Información:\n"
+            f"  • Tamaño: {file_size_mb:.2f} MB\n"
+            f"  • Calidad: {quality.capitalize()}\n\n"
+            f"Descargando... 0%"
         )
         
+        try:
+            # Descargar video
+            logger.info(f"Descargando video desde Telegram...")
+            file = await context.bot.get_file(video.file_id)
+            
+            # Generar nombre único
+            video_filename = f"{video.file_id}_{video.file_unique_id}.mp4"
+            video_path = TEMP_DIR / video_filename
+            
+            # Descargar
+            await file.download_to_drive(str(video_path))
+            logger.info(f"✅ Video descargado: {video_path}")
+            
+            # Actualizar progreso
+            await progress_msg.edit_text(
+                f"⏳ Procesando video...\n\n"
+                f"Descargando... 100%\n"
+                f"Comprimiendo... 0%"
+            )
+            
+            # Comprimir si FFmpeg está disponible
+            if not compressor:
+                await progress_msg.edit_text(
+                    "❌ FFmpeg no está disponible en este servidor.\n\n"
+                    "El bot está en modo demo. Para compresión real, usa una versión local."
+                )
+                return
+            
+            output_filename = f"{video.file_id}_compressed.mp4"
+            output_path = OUTPUT_DIR / output_filename
+            
+            # Ejecutar compresión
+            logger.info(f"Iniciando compresión con calidad: {quality}")
+            success = compressor.compress(str(video_path), str(output_path), quality)
+            
+            if not success:
+                await progress_msg.edit_text(
+                    "❌ Error al comprimir el video.\n\n"
+                    "Por favor, intenta con otro video."
+                )
+                return
+            
+            # Actualizar progreso
+            await progress_msg.edit_text(
+                f"⏳ Procesando video...\n\n"
+                f"Descargando... 100%\n"
+                f"Comprimiendo... 100%\n"
+                f"Enviando... 0%"
+            )
+            
+            # Obtener información de archivos
+            original_size = video_path.stat().st_size / (1024 * 1024)
+            compressed_size = output_path.stat().st_size / (1024 * 1024)
+            reduction = ((original_size - compressed_size) / original_size) * 100
+            
+            logger.info(f"Compresión exitosa: {original_size:.2f}MB → {compressed_size:.2f}MB ({reduction:.1f}%)")
+            
+            # Enviar video comprimido
+            with open(output_path, 'rb') as video_file:
+                await update.message.reply_video(
+                    video_file,
+                    caption=f"✅ **¡Video comprimido exitosamente!**\n\n"
+                            f"📊 **Estadísticas:**\n"
+                            f"  • Tamaño original: {original_size:.2f} MB\n"
+                            f"  • Tamaño comprimido: {compressed_size:.2f} MB\n"
+                            f"  • Reducción: {reduction:.1f}%\n"
+                            f"  • Calidad: {quality.capitalize()}",
+                    parse_mode='Markdown'
+                )
+            
+            # Eliminar archivo de progreso
+            await progress_msg.delete()
+            
+            # Limpiar archivos temporales
+            logger.info("Limpiando archivos temporales...")
+            video_path.unlink(missing_ok=True)
+            output_path.unlink(missing_ok=True)
+            
+        except TelegramError as e:
+            logger.error(f"Error de Telegram: {e}")
+            await progress_msg.edit_text(
+                f"❌ Error de comunicación con Telegram:\n\n"
+                f"`{str(e)}`",
+                parse_mode='Markdown'
+            )
+        except Exception as e:
+            logger.error(f"Error procesando video: {e}", exc_info=True)
+            await progress_msg.edit_text(
+                f"❌ Error al procesar el video:\n\n"
+                f"`{str(e)}`",
+                parse_mode='Markdown'
+            )
+            
     except Exception as e:
-        logger.error(f"Error en handle_video: {e}")
+        logger.error(f"Error en handle_video: {e}", exc_info=True)
         await update.message.reply_text(f"❌ Error: {str(e)}")
 
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Manejo de errores"""
-    logger.error(f"Update {update} caused error {context.error}")
+    logger.error(f"Update {update} caused error {context.error}", exc_info=context.error)
 
 
 def main() -> None:
     """Iniciar el bot"""
     try:
-        logger.info("🚀 Iniciando Bot de Compresión de Videos...")
+        logger.info("=" * 50)
+        logger.info("🚀 INICIANDO BOT DE COMPRESIÓN DE VIDEOS")
+        logger.info("=" * 50)
         logger.info(f"Token detectado: {BOT_TOKEN[:10]}...")
+        logger.info(f"FFmpeg disponible: {'✅ Sí' if FFMPEG_AVAILABLE else '❌ No'}")
+        logger.info(f"Directorio temporal: {TEMP_DIR}")
+        logger.info(f"Directorio de salida: {OUTPUT_DIR}")
+        logger.info("=" * 50)
         
         application = Application.builder().token(BOT_TOKEN).build()
         
@@ -191,10 +334,11 @@ def main() -> None:
         
         # Iniciar bot
         logger.info("✅ Bot iniciado exitosamente. Escuchando mensajes...")
+        logger.info("=" * 50)
         application.run_polling()
         
     except Exception as e:
-        logger.error(f"❌ Error al iniciar el bot: {e}")
+        logger.error(f"❌ Error fatal al iniciar el bot: {e}", exc_info=True)
         raise
 
 
