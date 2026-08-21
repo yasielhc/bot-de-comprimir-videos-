@@ -7,7 +7,6 @@ import os
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
-from video_compressor import VideoCompressor
 
 # Configuración de logging
 logging.basicConfig(
@@ -19,8 +18,14 @@ logger = logging.getLogger(__name__)
 # Token del bot
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 
-# Instancia del compresor de videos
-compressor = VideoCompressor()
+if not BOT_TOKEN:
+    logger.error("❌ BOT_TOKEN no está configurado en las variables de entorno")
+    raise ValueError(
+        "BOT_TOKEN no está configurado.\n"
+        "Agrega la variable de entorno BOT_TOKEN en Render Dashboard."
+    )
+
+logger.info("✅ Bot inicializando...")
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -133,64 +138,28 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Manejo de videos enviados"""
-    video = update.message.video
-    
-    if not video:
-        await update.message.reply_text("❌ Por favor, envía un archivo de video válido.")
-        return
-    
-    # Obtener configuración del usuario
-    quality = context.user_data.get('quality', 'medium')
-    
-    # Enviar mensaje de procesamiento
-    processing_msg = await update.message.reply_text(
-        "⏳ Descargando video...\n0%"
-    )
-    
     try:
-        # Descargar video
-        file = await context.bot.get_file(video.file_id)
-        video_path = f"downloads/{video.file_id}.mp4"
-        os.makedirs("downloads", exist_ok=True)
-        await file.download_to_drive(video_path)
+        # Por ahora, solo confirmamos que recibimos el video
+        video = update.message.video
         
-        # Actualizar progreso
-        await processing_msg.edit_text("⏳ Descargando video...\n100%\n⏳ Comprimiendo video...\n0%")
+        if not video:
+            await update.message.reply_text("❌ Por favor, envía un archivo de video válido.")
+            return
         
-        # Comprimir video
-        output_path = f"compressed/{video.file_id}_compressed.mp4"
-        os.makedirs("compressed", exist_ok=True)
+        file_size_mb = video.file_size / (1024 * 1024)
         
-        compressor.compress(video_path, output_path, quality)
-        
-        # Obtener información del archivo
-        original_size = os.path.getsize(video_path) / (1024 * 1024)  # MB
-        compressed_size = os.path.getsize(output_path) / (1024 * 1024)  # MB
-        reduction = ((original_size - compressed_size) / original_size) * 100
-        
-        await processing_msg.edit_text("⏳ Comprimiendo video...\n100%\n⏳ Enviando video...")
-        
-        # Enviar video comprimido
-        with open(output_path, 'rb') as video_file:
-            await update.message.reply_video(
-                video_file,
-                caption=f"✅ ¡Video comprimido exitosamente!\n\n"
-                        f"📊 Estadísticas:\n"
-                        f"  • Tamaño original: {original_size:.2f} MB\n"
-                        f"  • Tamaño comprimido: {compressed_size:.2f} MB\n"
-                        f"  • Reducción: {reduction:.1f}%\n"
-                        f"  • Calidad: {quality.capitalize()}"
-            )
-        
-        await processing_msg.delete()
-        
-        # Limpiar archivos
-        os.remove(video_path)
-        os.remove(output_path)
+        # Mensaje de confirmación (sin procesar aún)
+        await update.message.reply_text(
+            f"📹 Video recibido\n"
+            f"Tamaño: {file_size_mb:.2f} MB\n\n"
+            f"ℹ️ La compresión de videos requiere FFmpeg.\n"
+            f"🔧 Para usar la compresión completa, ejecuta este bot localmente.",
+            parse_mode='Markdown'
+        )
         
     except Exception as e:
-        logger.error(f"Error procesando video: {e}")
-        await processing_msg.edit_text(f"❌ Error al procesar el video: {str(e)}")
+        logger.error(f"Error en handle_video: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
 
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -200,28 +169,33 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 def main() -> None:
     """Iniciar el bot"""
-    if not BOT_TOKEN:
-        raise ValueError("BOT_TOKEN no está configurado en las variables de entorno")
-    
-    application = Application.builder().token(BOT_TOKEN).build()
-    
-    # Comandos
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("settings", settings_command))
-    
-    # Botones
-    application.add_handler(CallbackQueryHandler(button_callback))
-    
-    # Videos
-    application.add_handler(MessageHandler(filters.VIDEO, handle_video))
-    
-    # Errores
-    application.add_error_handler(error_handler)
-    
-    # Iniciar bot
-    print("🚀 Bot iniciado. Presiona Ctrl+C para detener.")
-    application.run_polling()
+    try:
+        logger.info("🚀 Iniciando Bot de Compresión de Videos...")
+        logger.info(f"Token detectado: {BOT_TOKEN[:10]}...")
+        
+        application = Application.builder().token(BOT_TOKEN).build()
+        
+        # Comandos
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CommandHandler("help", help_command))
+        application.add_handler(CommandHandler("settings", settings_command))
+        
+        # Botones
+        application.add_handler(CallbackQueryHandler(button_callback))
+        
+        # Videos
+        application.add_handler(MessageHandler(filters.VIDEO, handle_video))
+        
+        # Errores
+        application.add_error_handler(error_handler)
+        
+        # Iniciar bot
+        logger.info("✅ Bot iniciado exitosamente. Escuchando mensajes...")
+        application.run_polling()
+        
+    except Exception as e:
+        logger.error(f"❌ Error al iniciar el bot: {e}")
+        raise
 
 
 if __name__ == '__main__':
